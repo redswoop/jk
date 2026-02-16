@@ -12,6 +12,7 @@ Because when I threatened to call it "reaper" to troll my friend Joey, I was jus
 
 - 🎯 **Shows what matters**: `node:server.ts` instead of just "node"
 - 📍 **Working directory**: Know which project each process belongs to
+- 🔌 **Port detection**: See listening ports with `-p` (`node:server.ts:3000`)
 - ⏱️ **Age tracking**: See uptime (2m, 3h, 5d) to spot recent vs stale processes
 - 🎨 **Color coded**: Python, Node, Ruby, etc. get different colors
 - 🚫 **Hides system junk**: No more drowning in 500+ macOS daemons
@@ -42,6 +43,10 @@ jk node              # All node processes
 jk fractal           # Processes in fractal directory
 jk python            # All python processes
 
+# Show listening ports (slower, uses lsof)
+jk -p node           # node:server.ts:3000
+jk -p                # All processes with ports
+
 # Include GUI apps (Terminal, Safari, etc.)
 jk -g
 
@@ -55,11 +60,19 @@ jk --all
 
 ## What You See
 
+Without ports:
 ```
 PID     AGE     WHAT                      WHERE
 9186    42m     node:server.ts            src/fractal
 68289   7h45m   vscode:pylance            vsc:pylance
 72646   1d15h   BambuStudio               app/BambuStudio/log
+```
+
+With ports (`-p`):
+```
+PID     AGE     WHAT                      WHERE
+9186    42m     node:server.ts:3000       src/fractal
+5432    2h      python:api.py:8080        src/backend
 ```
 
 **Colors:**
