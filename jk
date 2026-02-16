@@ -53,40 +53,50 @@ def get_cwd_fast(pid):
     return None
 
 
-def get_listening_ports(pid):
-    """Get ports this process is listening on using lsof."""
+def get_all_listening_ports():
+    """Get all listening ports in one lsof call (much faster than per-PID).
+    Returns dict of {pid: [port1, port2, ...]}
+    """
     try:
-        # Use lsof to get listening TCP/UDP ports
-        # -Pan: P=no port names, a=all, n=no DNS
-        # -i: internet connections only
+        # Single lsof call for ALL listening ports
+        # -iTCP -sTCP:LISTEN: only listening TCP ports
+        # -n: no DNS resolution
+        # -P: no port name resolution
         result = subprocess.run(
-            ['lsof', '-Pan', '-p', str(pid), '-i'],
+            ['lsof', '-iTCP', '-sTCP:LISTEN', '-n', '-P'],
             capture_output=True,
             text=True,
-            timeout=0.5
+            timeout=2.0
         )
 
-        ports = set()
-        for line in result.stdout.split('\n'):
-            # Look for LISTEN state or UDP
-            if 'LISTEN' in line or 'UDP' in line:
-                # Extract port from lines like:
-                # node    1234 user   20u  IPv4 0x... TCP *:3000 (LISTEN)
-                # node    1234 user   21u  IPv6 0x... TCP *:3000 (LISTEN)
-                parts = line.split()
-                for part in parts:
-                    if ':' in part and part.startswith('*:'):
-                        port = part.split(':')[1]
-                        if port.isdigit():
-                            ports.add(port)
-                    elif part.startswith('127.0.0.1:') or part.startswith('localhost:'):
-                        port = part.split(':')[1]
-                        if port.isdigit():
-                            ports.add(port)
+        pid_ports = {}
+        for line in result.stdout.split('\n')[1:]:  # Skip header
+            if not line.strip():
+                continue
 
-        return sorted(ports, key=int) if ports else None
+            parts = line.split()
+            if len(parts) < 9:
+                continue
+
+            try:
+                pid = int(parts[1])
+                # Port is usually in format *:3000 or 127.0.0.1:3000
+                addr_part = parts[8]
+                if ':' in addr_part:
+                    port = addr_part.split(':')[-1]
+                    # Remove (LISTEN) suffix if present
+                    port = port.split('(')[0]
+                    if port.isdigit():
+                        if pid not in pid_ports:
+                            pid_ports[pid] = set()
+                        pid_ports[pid].add(port)
+            except (ValueError, IndexError):
+                continue
+
+        # Convert sets to sorted lists
+        return {pid: sorted(ports, key=int) for pid, ports in pid_ports.items()}
     except Exception:
-        return None
+        return {}
 
 
 def parse_command(cmd):
@@ -236,6 +246,11 @@ def main():
             filter_term = arg.lower()
             break
 
+    # Get all listening ports once (much faster than per-PID lsof)
+    port_map = {}
+    if show_ports:
+        port_map = get_all_listening_ports()
+
     # Get process list with full command line
     ps_cmd = ['ps', '-eww', '-o', 'pid=,etime=,command=']
     result = subprocess.run(ps_cmd, capture_output=True, text=True)
@@ -270,10 +285,8 @@ def main():
         elapsed_secs = parse_elapsed(elapsed)
         age = format_age(elapsed_secs)
 
-        # Get listening ports if requested (slower, uses lsof)
-        ports = None
-        if show_ports:
-            ports = get_listening_ports(pid)
+        # Look up listening ports from pre-built map
+        ports = port_map.get(pid) if show_ports else None
 
         processes.append({
             'pid': pid,
