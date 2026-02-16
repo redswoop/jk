@@ -53,6 +53,42 @@ def get_cwd_fast(pid):
     return None
 
 
+def get_listening_ports(pid):
+    """Get ports this process is listening on using lsof."""
+    try:
+        # Use lsof to get listening TCP/UDP ports
+        # -Pan: P=no port names, a=all, n=no DNS
+        # -i: internet connections only
+        result = subprocess.run(
+            ['lsof', '-Pan', '-p', str(pid), '-i'],
+            capture_output=True,
+            text=True,
+            timeout=0.5
+        )
+
+        ports = set()
+        for line in result.stdout.split('\n'):
+            # Look for LISTEN state or UDP
+            if 'LISTEN' in line or 'UDP' in line:
+                # Extract port from lines like:
+                # node    1234 user   20u  IPv4 0x... TCP *:3000 (LISTEN)
+                # node    1234 user   21u  IPv6 0x... TCP *:3000 (LISTEN)
+                parts = line.split()
+                for part in parts:
+                    if ':' in part and part.startswith('*:'):
+                        port = part.split(':')[1]
+                        if port.isdigit():
+                            ports.add(port)
+                    elif part.startswith('127.0.0.1:') or part.startswith('localhost:'):
+                        port = part.split(':')[1]
+                        if port.isdigit():
+                            ports.add(port)
+
+        return sorted(ports, key=int) if ports else None
+    except Exception:
+        return None
+
+
 def parse_command(cmd):
     """Extract the 'real' thing being run from a command line."""
     cmd = cmd.strip()
@@ -168,6 +204,7 @@ def main():
         print("Options:")
         print("  -a, --all       Show system processes (hidden by default)")
         print("  -g, --gui-apps  Show GUI apps like Terminal, Safari, etc.")
+        print("  -p, --ports     Show listening ports (slower, uses lsof)")
         print("  -q, --quiet     Just print PIDs (for piping to kill)")
         print("  -h, --help      Show this help")
         print()
@@ -186,6 +223,18 @@ def main():
         print("  ps.py -g                # Include GUI apps")
         print("  kill $(ps.py node -q)   # Kill all node processes")
         return
+
+    # Parse arguments
+    args = sys.argv[1:]
+    show_all = '--all' in args or '-a' in args
+    quiet = '--quiet' in args or '-q' in args
+    show_gui = '--gui-apps' in args or '-g' in args
+    show_ports = '--ports' in args or '-p' in args
+    filter_term = None
+    for arg in args:
+        if not arg.startswith('-'):
+            filter_term = arg.lower()
+            break
 
     # Get process list with full command line
     ps_cmd = ['ps', '-eww', '-o', 'pid=,etime=,command=']
@@ -221,25 +270,23 @@ def main():
         elapsed_secs = parse_elapsed(elapsed)
         age = format_age(elapsed_secs)
 
+        # Get listening ports if requested (slower, uses lsof)
+        ports = None
+        if show_ports:
+            # Only check for processes likely to have network connections
+            likely_network = any(x in parsed.lower() for x in ['node', 'python', 'ruby', 'rails', 'uvicorn', 'gunicorn', 'npm', 'npx'])
+            if likely_network:
+                ports = get_listening_ports(pid)
+
         processes.append({
             'pid': pid,
             'elapsed_secs': elapsed_secs,
             'age': age,
             'parsed': parsed,
+            'ports': ports,
             'cwd': cwd or '?',
             'cmd': cmd
         })
-
-    # Parse arguments
-    args = sys.argv[1:]
-    show_all = '--all' in args or '-a' in args
-    quiet = '--quiet' in args or '-q' in args
-    show_gui = '--gui-apps' in args or '-g' in args
-    filter_term = None
-    for arg in args:
-        if not arg.startswith('-'):
-            filter_term = arg.lower()
-            break
 
     # Filter out system processes by default
     # Also filter out this script itself
@@ -391,7 +438,12 @@ def main():
         print(f"{YELLOW}{recent} recent (<1m) highlighted{RESET}")
 
     for p in processes:
-        what = p['parsed'][:24]
+        what = p['parsed']
+        # Append ports if present
+        if p.get('ports'):
+            ports_str = ','.join(p['ports'])
+            what = f"{what}:{ports_str}"
+        what = what[:24]
         where = p['cwd_display']
 
         # Truncate if still too long (for narrow terminals)
