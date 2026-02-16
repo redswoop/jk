@@ -1,0 +1,63 @@
+version: 2
+
+project_name: jk
+
+builds:
+  - id: darwin
+    dir: go
+    binary: jk
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    env:
+      - CGO_ENABLED=1
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+  - id: linux
+    dir: go
+    binary: jk
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - id: default
+    format: tar.gz
+    name_template: "jk_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+brews:
+  - name: jk
+    repository:
+      owner: redswoop
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/redswoop/jk"
+    description: "A smarter ps for finding things to kill"
+    license: "MIT"
+    install: |
+      bin.install "jk"
+    test: |
+      system "#{bin}/jk", "--version"

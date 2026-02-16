@@ -8,3 +8,6 @@ __pycache__/
 *~
 .vscode/
 .idea/
+
+# Go
+go/jk

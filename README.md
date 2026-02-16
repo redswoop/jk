@@ -21,15 +21,22 @@ Because when I threatened to call it "reaper" to troll my friend Joey, I was jus
 
 ## Installation
 
+**Homebrew (macOS):**
 ```bash
-# Clone and install
-git clone https://github.com/redswoop/jk.git
-cd jk
-chmod +x jk
-sudo ln -s $(pwd)/jk /usr/local/bin/jk
+brew install redswoop/tap/jk
+```
 
-# Or just copy it
-sudo cp jk /usr/local/bin/jk
+**Linux / other (curl):**
+```bash
+curl -fsSL https://raw.githubusercontent.com/redswoop/jk/main/install.sh | bash
+```
+
+**From source:**
+```bash
+git clone https://github.com/redswoop/jk.git
+cd jk/go
+make build
+sudo mv jk /usr/local/bin/
 ```
 
 ## Usage
@@ -123,8 +130,8 @@ alias pps='jk'
 
 ## Requirements
 
-- macOS (uses libproc for fast cwd lookup)
-- Python 3.6+
+- macOS or Linux (amd64/arm64)
+- macOS uses libproc for fast cwd lookup; Linux reads /proc
 
 ## Why not just use htop/btop/etc?
 
