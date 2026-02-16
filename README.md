@@ -34,7 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/redswoop/jk/main/install.sh | bash
 **From source:**
 ```bash
 git clone https://github.com/redswoop/jk.git
-cd jk/go
+cd jk
 make build
 sudo mv jk /usr/local/bin/
 ```

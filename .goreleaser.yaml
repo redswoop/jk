@@ -4,7 +4,6 @@ project_name: jk
 
 builds:
   - id: darwin
-    dir: go
     binary: jk
     goos:
       - darwin
@@ -17,7 +16,6 @@ builds:
       - -s -w -X main.version={{.Version}}
 
   - id: linux
-    dir: go
     binary: jk
     goos:
       - linux
