@@ -273,10 +273,7 @@ def main():
         # Get listening ports if requested (slower, uses lsof)
         ports = None
         if show_ports:
-            # Only check for processes likely to have network connections
-            likely_network = any(x in parsed.lower() for x in ['node', 'python', 'ruby', 'rails', 'uvicorn', 'gunicorn', 'npm', 'npx'])
-            if likely_network:
-                ports = get_listening_ports(pid)
+            ports = get_listening_ports(pid)
 
         processes.append({
             'pid': pid,
