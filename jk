@@ -1,0 +1,438 @@
+#!/usr/bin/env python3
+"""
+Better ps - shows what's actually running, where, and for how long.
+Fast cwd lookup using libproc (macOS only).
+"""
+
+import sys
+import subprocess
+import re
+import os
+from ctypes import cdll, c_int, c_uint32, c_char_p, Structure, byref, c_uint64
+from datetime import datetime, timedelta
+
+
+# libproc structures and constants
+PROC_PIDPATHINFO_MAXSIZE = 4096
+PROC_PIDVNODEPATHINFO = 9
+
+class vnode_info_path(Structure):
+    _fields_ = [
+        ("vip_vi", c_char_p),  # simplified
+        ("vip_path", c_char_p * PROC_PIDPATHINFO_MAXSIZE)
+    ]
+
+
+def get_cwd_fast(pid):
+    """Get process working directory using libproc (fast!)"""
+    try:
+        libproc = cdll.LoadLibrary('/usr/lib/libproc.dylib')
+
+        # Use proc_pidinfo with PROC_PIDVNODEPATHINFO
+        from ctypes import create_string_buffer
+
+        buf = create_string_buffer(PROC_PIDPATHINFO_MAXSIZE * 4)
+        ret = libproc.proc_pidinfo(
+            c_int(pid),
+            c_int(PROC_PIDVNODEPATHINFO),
+            c_uint64(0),
+            byref(buf),
+            c_int(len(buf))
+        )
+
+        if ret > 0:
+            # The cwd is at a specific offset in the structure
+            # This is fragile but works for now
+            cwd_bytes = buf.raw[152:152+1024]  # vip_path offset
+            cwd = cwd_bytes.split(b'\x00')[0].decode('utf-8', errors='replace')
+            if cwd and cwd != '':
+                return cwd
+    except Exception as e:
+        pass
+
+    return None
+
+
+def parse_command(cmd):
+    """Extract the 'real' thing being run from a command line."""
+    cmd = cmd.strip()
+
+    # Handle Visual Studio Code extensions/language servers
+    if 'Visual Studio Code.app' in cmd and 'Code Helper' in cmd:
+        # Extract extension name from path
+        if 'pylance' in cmd.lower():
+            return 'vscode:pylance'
+        elif 'markdown-language-features' in cmd:
+            return 'vscode:markdown'
+        elif 'json-language-features' in cmd:
+            return 'vscode:json'
+        elif '/extensions/' in cmd:
+            # Try to extract extension name
+            m = re.search(r'/extensions/([^/]+)', cmd)
+            if m:
+                ext = m.group(1).split('.')[0]  # Take first part
+                return f'vscode:{ext}'
+        return 'vscode'
+
+    # Handle npm/npx/yarn
+    if ' npm ' in cmd or cmd.startswith('npm '):
+        # Extract "npm run dev" -> "npm:dev"
+        m = re.search(r'npm\s+(?:run\s+)?(\S+)', cmd)
+        if m:
+            return f"npm:{m.group(1)}"
+
+    if ' npx ' in cmd or cmd.startswith('npx '):
+        m = re.search(r'npx\s+(\S+)', cmd)
+        if m:
+            return f"npx:{m.group(1)}"
+
+    # Handle node/python/ruby - extract the actual script
+    interpreters = [
+        (r'\bnode\b.*?\s+([^\s-][^/\s]*\.(?:js|ts|mjs))', 'node'),
+        (r'\bnode\b.*?/([^/\s]+\.(?:js|ts|mjs))', 'node'),
+        (r'\bpython[23]?\b.*?\s+([^\s-][^/\s]*\.py)', 'python'),
+        (r'\bpython[23]?\b.*?/([^/\s]+\.py)', 'python'),
+        (r'\bruby\b.*?\s+([^\s-][^/\s]*\.rb)', 'ruby'),
+        (r'\bruby\b.*?/([^/\s]+\.rb)', 'ruby'),
+        (r'\bperl\b.*?\s+([^\s-][^/\s]*\.pl)', 'perl'),
+        (r'\bperl\b.*?/([^/\s]+\.pl)', 'perl'),
+    ]
+
+    for pattern, prefix in interpreters:
+        m = re.search(pattern, cmd)
+        if m:
+            return f"{prefix}:{m.group(1)}"
+
+    # Just show the binary name for everything else
+    parts = cmd.split()
+    if parts:
+        binary = parts[0].split('/')[-1]
+        # Truncate long binary names
+        if len(binary) > 50:
+            binary = binary[:47] + '...'
+        return binary
+
+    return cmd[:60]
+
+
+def parse_elapsed(elapsed_str):
+    """Parse ps elapsed time to seconds for sorting."""
+    # Format can be: [[dd-]hh:]mm:ss
+    parts = elapsed_str.split('-')
+    if len(parts) == 2:
+        days = int(parts[0])
+        time_part = parts[1]
+    else:
+        days = 0
+        time_part = parts[0]
+
+    time_parts = time_part.split(':')
+    if len(time_parts) == 3:
+        hours, mins, secs = map(int, time_parts)
+    elif len(time_parts) == 2:
+        hours = 0
+        mins, secs = map(int, time_parts)
+    else:
+        return 0
+
+    return days * 86400 + hours * 3600 + mins * 60 + secs
+
+
+def format_age(seconds):
+    """Format elapsed seconds into compact age string."""
+    if seconds < 60:
+        return f"{seconds}s"
+    elif seconds < 3600:
+        return f"{seconds // 60}m"
+    elif seconds < 86400:
+        hours = seconds // 3600
+        mins = (seconds % 3600) // 60
+        if mins > 0:
+            return f"{hours}h{mins}m"
+        return f"{hours}h"
+    else:
+        days = seconds // 86400
+        hours = (seconds % 86400) // 3600
+        if hours > 0:
+            return f"{days}d{hours}h"
+        return f"{days}d"
+
+
+def main():
+    # Handle help
+    if '-h' in sys.argv or '--help' in sys.argv:
+        print("Usage: ps.py [OPTIONS] [FILTER]")
+        print()
+        print("Show processes in a compact, kill-friendly format")
+        print()
+        print("Options:")
+        print("  -a, --all       Show system processes (hidden by default)")
+        print("  -g, --gui-apps  Show GUI apps like Terminal, Safari, etc.")
+        print("  -q, --quiet     Just print PIDs (for piping to kill)")
+        print("  -h, --help      Show this help")
+        print()
+        print("Colors:")
+        print("  Recent (<1m):   Yellow (easy to spot what you just started)")
+        print("  Old (>1d):      Dim (old processes)")
+        print("  By type:        python=yellow, node=green, ruby=magenta, etc.")
+        print()
+        print("  Customize with PS_COLORS environment variable:")
+        print("    export PS_COLORS='python=31:node=32:ruby=35'")
+        print("    Colors: 31=red 32=green 33=yellow 34=blue 35=magenta 36=cyan")
+        print()
+        print("Examples:")
+        print("  ps.py node              # Show all node processes")
+        print("  ps.py fractal           # Show processes in fractal directory")
+        print("  ps.py -g                # Include GUI apps")
+        print("  kill $(ps.py node -q)   # Kill all node processes")
+        return
+
+    # Get process list with full command line
+    ps_cmd = ['ps', '-eww', '-o', 'pid=,etime=,command=']
+    result = subprocess.run(ps_cmd, capture_output=True, text=True)
+
+    processes = []
+    for line in result.stdout.strip().split('\n'):
+        if not line.strip():
+            continue
+
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            continue
+
+        pid = int(parts[0])
+        elapsed = parts[1]
+        cmd = parts[2]
+
+        # Filter: skip kernel tasks and some obvious noise
+        if cmd.startswith('[') or 'kernel_task' in cmd:
+            continue
+
+        parsed = parse_command(cmd)
+        cwd = get_cwd_fast(pid)
+
+        # Shorten cwd for display
+        if cwd:
+            # Replace home directory with ~
+            home = os.path.expanduser('~')
+            if cwd.startswith(home):
+                cwd = '~' + cwd[len(home):]
+
+        elapsed_secs = parse_elapsed(elapsed)
+        age = format_age(elapsed_secs)
+
+        processes.append({
+            'pid': pid,
+            'elapsed_secs': elapsed_secs,
+            'age': age,
+            'parsed': parsed,
+            'cwd': cwd or '?',
+            'cmd': cmd
+        })
+
+    # Parse arguments
+    args = sys.argv[1:]
+    show_all = '--all' in args or '-a' in args
+    quiet = '--quiet' in args or '-q' in args
+    show_gui = '--gui-apps' in args or '-g' in args
+    filter_term = None
+    for arg in args:
+        if not arg.startswith('-'):
+            filter_term = arg.lower()
+            break
+
+    # Filter out system processes by default
+    # Also filter out this script itself
+    my_pid = os.getpid()
+
+    def is_user_process(p):
+        """Keep only processes you'd actually want to kill."""
+        cwd = p['cwd']
+        cmd = p['cmd']
+
+        # Always filter these
+        if p['pid'] == my_pid or 'python:ps.py' in p['parsed']:
+            return False
+
+        # GUI apps mode - include apps even with cwd=/
+        if show_gui and cwd == '/':
+            # Keep if it's a user-facing GUI app
+            if '/Applications/' in cmd or '/System/Applications/' in cmd:
+                return True
+
+        if cwd in ('?', '/'):
+            return False
+
+        # Filter macOS system junk
+        junk_paths = [
+            '/Library/Containers/',
+            '/private/var/folders/',
+            '/System/',
+            '/Applications/',  # Unless it's in your home
+        ]
+
+        for junk in junk_paths:
+            if junk in cwd and not cwd.startswith(os.path.expanduser('~')):
+                return False
+
+        # Filter sandboxed system services
+        if '/Library/Containers/com.apple.' in cwd:
+            return False
+        if '/Library/Containers/net.whatsapp.' in cwd:
+            return False
+
+        return True
+
+    if not show_all:
+        processes = [p for p in processes if is_user_process(p)]
+
+    # Apply search filter
+    if filter_term:
+        processes = [p for p in processes if
+                     filter_term in p['parsed'].lower() or
+                     filter_term in p['cwd'].lower() or
+                     filter_term in p['cmd'].lower()]
+
+    # Sort by elapsed time (newest first)
+    processes.sort(key=lambda p: p['elapsed_secs'])
+
+    # Quiet mode - just print PIDs
+    if quiet:
+        for p in processes:
+            print(p['pid'])
+        return
+
+    # ANSI color codes
+    YELLOW = '\033[93m'
+    DIM = '\033[2m'
+    RESET = '\033[0m'
+    use_color = sys.stdout.isatty()
+
+    # Process type colors - can be overridden by PS_COLORS env var
+    # Format: PS_COLORS="python=32:node=33:ruby=35:go=36:rust=31"
+    # Colors: 31=red, 32=green, 33=yellow, 34=blue, 35=magenta, 36=cyan
+    default_colors = {
+        'python': '33',    # yellow
+        'node': '32',      # green
+        'ruby': '35',      # magenta
+        'perl': '36',      # cyan
+        'go': '34',        # blue
+        'rust': '31',      # red
+        'npm': '32',       # green (same as node)
+        'npx': '32',       # green
+        'vscode': '34',    # blue
+    }
+
+    # Parse PS_COLORS environment variable
+    type_colors = default_colors.copy()
+    ps_colors = os.environ.get('PS_COLORS', '')
+    if ps_colors:
+        for pair in ps_colors.split(':'):
+            if '=' in pair:
+                ptype, color = pair.split('=', 1)
+                type_colors[ptype.lower()] = color
+
+    def get_process_color(parsed):
+        """Get color for a process based on its type."""
+        if not use_color:
+            return ''
+
+        # Extract type from parsed name (e.g., "python:script.py" -> "python")
+        ptype = parsed.split(':')[0].lower()
+        color_code = type_colors.get(ptype)
+        if color_code:
+            return f'\033[{color_code}m'
+        return ''
+
+    # Aggressively strip verbose cloud storage paths
+    def shorten_path(path):
+        """Strip verbose prefixes to make paths readable."""
+        # Special case for vscode extensions - just show extension name
+        if '/.vscode/extensions/' in path:
+            # Extract extension name: ms-python.vscode-pylance-2025.10.4 -> pylance
+            parts = path.split('/')
+            for i, part in enumerate(parts):
+                if part == 'extensions' and i + 1 < len(parts):
+                    ext_full = parts[i + 1]  # e.g., ms-python.vscode-pylance-2025.10.4
+                    # Format is usually: publisher.extension-name-version
+                    # E.g., ms-python.vscode-pylance-2025.10.4 -> pylance
+                    if '.' in ext_full:
+                        after_dot = ext_full.split('.', 1)[1]  # vscode-pylance-2025.10.4
+                        # Remove "vscode-" prefix if present, then take first word
+                        name = after_dot.replace('vscode-', '').split('-')[0]
+                        return f'vsc:{name}'
+                    return f'vsc:ext'
+
+        # Strip in order of specificity (using ~ not expanded paths)
+        replacements = [
+            ('~/Library/CloudStorage/Dropbox/', ''),
+            ('~/Library/CloudStorage/', 'cloud/'),
+            ('~/Library/Application Support/', 'app/'),
+            ('~/Library/Containers/', 'box/'),
+            ('~/Library/', 'lib/'),
+        ]
+
+        for old, new in replacements:
+            if path.startswith(old):
+                result = new + path[len(old):]
+                return result if result else '~'
+
+        return path
+
+    for p in processes:
+        p['cwd_display'] = shorten_path(p['cwd'])
+
+    # Count recent processes
+    recent = sum(1 for p in processes if p['elapsed_secs'] < 60)
+
+    # Print header
+    print(f"{'PID':<7} {'AGE':<7} {'WHAT':<25} {'WHERE'}")
+    if use_color and recent > 0:
+        print(f"{YELLOW}{recent} recent (<1m) highlighted{RESET}")
+
+    for p in processes:
+        what = p['parsed'][:24]
+        where = p['cwd_display']
+
+        # Truncate if still too long (for narrow terminals)
+        max_width = 38
+        if len(where) > max_width:
+            # Show last 2 parts of path
+            parts = where.split('/')
+            if len(parts) > 2:
+                short = '/'.join(parts[-2:])
+                if len(short) <= max_width:
+                    where = '…/' + short
+                else:
+                    where = '…' + where[-(max_width-1):]
+            else:
+                where = '…' + where[-(max_width-1):]
+
+        # Color coding: age takes precedence, then type
+        color = ''
+        if use_color:
+            if p['elapsed_secs'] < 60:  # Less than 1 minute - highlight!
+                color = YELLOW
+            elif p['elapsed_secs'] > 86400:  # More than 1 day - dim
+                color = DIM
+            else:
+                # Use type-based color for everything else
+                color = get_process_color(p['parsed'])
+
+        line = f"{p['pid']:<7} {p['age']:<7} {what:<28} {where}"
+        if color:
+            print(f"{color}{line}{RESET}")
+        else:
+            print(line)
+
+    # Compact footer
+    parts = [f"{len(processes)} processes"]
+    if not show_all:
+        parts.append("--all for system")
+    if filter_term:
+        parts.append(f"filter: {filter_term}")
+    print(f"\n{' | '.join(parts)}")
+
+
+if __name__ == '__main__':
+    main()
