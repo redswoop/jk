@@ -215,6 +215,7 @@ def main():
         print("  -a, --all       Show system processes (hidden by default)")
         print("  -g, --gui-apps  Show GUI apps like Terminal, Safari, etc.")
         print("  -p, --ports     Show listening ports (slower, uses lsof)")
+        print("  -t, --tree      Show parent/child relationships")
         print("  -q, --quiet     Just print PIDs (for piping to kill)")
         print("  -h, --help      Show this help")
         print()
@@ -240,6 +241,7 @@ def main():
     quiet = '--quiet' in args or '-q' in args
     show_gui = '--gui-apps' in args or '-g' in args
     show_ports = '--ports' in args or '-p' in args
+    show_tree = '--tree' in args or '-t' in args
     filter_term = None
     for arg in args:
         if not arg.startswith('-'):
@@ -252,7 +254,7 @@ def main():
         port_map = get_all_listening_ports()
 
     # Get process list with full command line
-    ps_cmd = ['ps', '-eww', '-o', 'pid=,etime=,command=']
+    ps_cmd = ['ps', '-eww', '-o', 'pid=,ppid=,etime=,command=']
     result = subprocess.run(ps_cmd, capture_output=True, text=True)
 
     processes = []
@@ -260,13 +262,14 @@ def main():
         if not line.strip():
             continue
 
-        parts = line.split(None, 2)
-        if len(parts) < 3:
+        parts = line.split(None, 3)
+        if len(parts) < 4:
             continue
 
         pid = int(parts[0])
-        elapsed = parts[1]
-        cmd = parts[2]
+        ppid = int(parts[1])
+        elapsed = parts[2]
+        cmd = parts[3]
 
         # Filter: skip kernel tasks and some obvious noise
         if cmd.startswith('[') or 'kernel_task' in cmd:
@@ -290,6 +293,7 @@ def main():
 
         processes.append({
             'pid': pid,
+            'ppid': ppid,
             'elapsed_secs': elapsed_secs,
             'age': age,
             'parsed': parsed,
@@ -442,6 +446,52 @@ def main():
     # Count recent processes
     recent = sum(1 for p in processes if p['elapsed_secs'] < 60)
 
+    # Build process tree if requested
+    if show_tree:
+        # Build parent->children map
+        pid_to_proc = {p['pid']: p for p in processes}
+        children_map = {}
+        for p in processes:
+            ppid = p['ppid']
+            if ppid in pid_to_proc:
+                if ppid not in children_map:
+                    children_map[ppid] = []
+                children_map[ppid].append(p)
+
+        # Find roots (processes whose parent isn't in our list)
+        roots = [p for p in processes if p['ppid'] not in pid_to_proc]
+
+        # Flatten tree in depth-first order with indentation
+        def flatten_tree(proc, depth=0, is_last_sibling=True, prefix=''):
+            # Add tree decoration
+            if depth == 0:
+                proc['_tree_prefix'] = ''
+            else:
+                connector = '└─ ' if is_last_sibling else '├─ '
+                proc['_tree_prefix'] = prefix + connector
+
+            proc['_tree_depth'] = depth
+            result = [proc]
+
+            children = children_map.get(proc['pid'], [])
+            children.sort(key=lambda p: p['elapsed_secs'])  # Oldest first
+
+            for i, child in enumerate(children):
+                is_last_child = (i == len(children) - 1)
+                # Build prefix for children
+                if depth == 0:
+                    child_prefix = ''
+                else:
+                    child_prefix = prefix + ('   ' if is_last_sibling else '│  ')
+                result.extend(flatten_tree(child, depth + 1, is_last_child, child_prefix))
+            return result
+
+        # Rebuild processes in tree order
+        tree_processes = []
+        for root in sorted(roots, key=lambda p: p['elapsed_secs']):
+            tree_processes.extend(flatten_tree(root))
+        processes = tree_processes
+
     # Print header
     print(f"{'PID':<7} {'AGE':<7} {'WHAT':<25} {'WHERE'}")
     if use_color and recent > 0:
@@ -481,7 +531,14 @@ def main():
                 # Use type-based color for everything else
                 color = get_process_color(p['parsed'])
 
-        line = f"{p['pid']:<7} {p['age']:<7} {what:<28} {where}"
+        # Add tree prefix if in tree mode
+        if show_tree and '_tree_prefix' in p:
+            prefix = p['_tree_prefix']
+            pid_col = f"{prefix}{p['pid']}"
+        else:
+            pid_col = f"{p['pid']:<7}"
+
+        line = f"{pid_col:<20} {p['age']:<7} {what:<25} {where}"
         if color:
             print(f"{color}{line}{RESET}")
         else:
