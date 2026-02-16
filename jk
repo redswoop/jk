@@ -448,49 +448,60 @@ def main():
 
     # Build process tree if requested
     if show_tree:
-        # Build parent->children map
         pid_to_proc = {p['pid']: p for p in processes}
-        children_map = {}
-        for p in processes:
-            ppid = p['ppid']
-            if ppid in pid_to_proc:
-                if ppid not in children_map:
-                    children_map[ppid] = []
-                children_map[ppid].append(p)
 
-        # Find roots (processes whose parent isn't in our list)
-        roots = [p for p in processes if p['ppid'] not in pid_to_proc]
-
-        # Flatten tree in depth-first order with indentation
-        def flatten_tree(proc, depth=0, is_last_sibling=True, prefix=''):
-            # Add tree decoration
-            if depth == 0:
-                proc['_tree_prefix'] = ''
-            else:
-                connector = '└─ ' if is_last_sibling else '├─ '
-                proc['_tree_prefix'] = prefix + connector
-
-            proc['_tree_depth'] = depth
-            result = [proc]
-
-            children = children_map.get(proc['pid'], [])
-            children.sort(key=lambda p: p['elapsed_secs'])  # Oldest first
-
-            for i, child in enumerate(children):
-                is_last_child = (i == len(children) - 1)
-                # Build prefix for children
-                if depth == 0:
-                    child_prefix = ''
+        if show_all:
+            # For --all: Just show parent name inline, don't build full tree
+            # (Too many processes to show full hierarchy)
+            for p in processes:
+                parent = pid_to_proc.get(p['ppid'])
+                if parent:
+                    p['_parent_name'] = parent['parsed'][:15]
                 else:
-                    child_prefix = prefix + ('   ' if is_last_sibling else '│  ')
-                result.extend(flatten_tree(child, depth + 1, is_last_child, child_prefix))
-            return result
+                    p['_parent_name'] = None
+        else:
+            # For filtered lists: Build proper tree
+            children_map = {}
+            for p in processes:
+                ppid = p['ppid']
+                if ppid in pid_to_proc:
+                    if ppid not in children_map:
+                        children_map[ppid] = []
+                    children_map[ppid].append(p)
 
-        # Rebuild processes in tree order
-        tree_processes = []
-        for root in sorted(roots, key=lambda p: p['elapsed_secs']):
-            tree_processes.extend(flatten_tree(root))
-        processes = tree_processes
+            # Find roots (processes whose parent isn't in our list)
+            roots = [p for p in processes if p['ppid'] not in pid_to_proc]
+
+            # Flatten tree in depth-first order with indentation
+            def flatten_tree(proc, depth=0, is_last_sibling=True, prefix=''):
+                # Add tree decoration
+                if depth == 0:
+                    proc['_tree_prefix'] = ''
+                else:
+                    connector = '└─ ' if is_last_sibling else '├─ '
+                    proc['_tree_prefix'] = prefix + connector
+
+                proc['_tree_depth'] = depth
+                result = [proc]
+
+                children = children_map.get(proc['pid'], [])
+                children.sort(key=lambda p: p['elapsed_secs'])  # Oldest first
+
+                for i, child in enumerate(children):
+                    is_last_child = (i == len(children) - 1)
+                    # Build prefix for children
+                    if depth == 0:
+                        child_prefix = ''
+                    else:
+                        child_prefix = prefix + ('   ' if is_last_sibling else '│  ')
+                    result.extend(flatten_tree(child, depth + 1, is_last_child, child_prefix))
+                return result
+
+            # Rebuild processes in tree order
+            tree_processes = []
+            for root in sorted(roots, key=lambda p: p['elapsed_secs']):
+                tree_processes.extend(flatten_tree(root))
+            processes = tree_processes
 
     # Print header
     print(f"{'PID':<7} {'AGE':<7} {'WHAT':<25} {'WHERE'}")
@@ -531,14 +542,21 @@ def main():
                 # Use type-based color for everything else
                 color = get_process_color(p['parsed'])
 
-        # Add tree prefix if in tree mode
-        if show_tree and '_tree_prefix' in p:
-            prefix = p['_tree_prefix']
-            pid_col = f"{prefix}{p['pid']}"
+        # Add tree prefix or parent info if in tree mode
+        if show_tree:
+            if '_tree_prefix' in p:
+                # Full tree mode (without --all)
+                prefix = p['_tree_prefix']
+                pid_col = f"{prefix}{p['pid']}"
+            elif '_parent_name' in p and p['_parent_name']:
+                # Parent inline mode (with --all)
+                pid_col = f"{p['pid']} ← {p['_parent_name']}"
+            else:
+                pid_col = str(p['pid'])
         else:
             pid_col = f"{p['pid']:<7}"
 
-        line = f"{pid_col:<20} {p['age']:<7} {what:<25} {where}"
+        line = f"{pid_col:<25} {p['age']:<7} {what:<25} {where}"
         if color:
             print(f"{color}{line}{RESET}")
         else:
