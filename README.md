@@ -22,7 +22,7 @@ Because when I threatened to call it "reaper" to troll my friend Joey, I was jus
 
 ```bash
 # Clone and install
-git clone https://github.com/YOUR_USERNAME/jk.git
+git clone https://github.com/redswoop/jk.git
 cd jk
 chmod +x jk
 sudo ln -s $(pwd)/jk /usr/local/bin/jk
